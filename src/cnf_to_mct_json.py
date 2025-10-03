@@ -1,6 +1,7 @@
 import qiskit
-from qiskit import QuantumCircuit, transpile
+from qiskit import QuantumCircuit, transpile, QuantumRegister
 from qiskit.circuit.library import MCXGate
+from qiskit.synthesis import synth_mcx_1_clean_kg24
 from qiskit import qasm2
 
 import json
@@ -124,24 +125,103 @@ def build_circuit_from_cnf_with_global_and(nvars, clauses):
 
     return qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit
 
+def decompose_mcx_clean(circ: QuantumCircuit,
+                        synth_fn=synth_mcx_1_clean_kg24,
+                        ancilla_prefix: str = "anc") -> QuantumCircuit:
+    """
+    Replace every MCXGate in `circ` with the clean-ancilla synthesis returned by synth_fn(k).
+    synth_fn(k) should return a QuantumCircuit whose qubit order is (controls..., ancillas..., target).
+    If the original MCX call did not provide enough qubits for the subcircuit, this function
+    automatically allocates ancilla registers with unique names (anc0, anc1, ...).
+    """
+    # Start a new circuit with the same total primary qubits/clbits (these are 'placeholder' qubits).
+    new_circ = QuantumCircuit(circ.num_qubits, circ.num_clbits)
+
+    # Maps from original circuit bits to new circuit bits
+    orig_qubit_map = {q: new_circ.qubits[i] for i, q in enumerate(circ.qubits)}
+    orig_clbit_map = {c: new_circ.clbits[i] for i, c in enumerate(circ.clbits)}
+
+    anc_counter = 0
+
+    for instr, qargs, cargs in circ.data:
+        # If it's an MCX gate, replace it
+        if isinstance(instr, MCXGate):
+            k = instr.num_ctrl_qubits
+            sub = synth_fn(k)
+            sub_nq = sub.num_qubits
+
+            # Map the qargs from the original circuit to the new circuit's qubits
+            mapped_orig = [orig_qubit_map[q] for q in qargs]
+
+            # If the synth subcircuit needs more qubits than were provided in the original call,
+            # allocate ancillas with a unique register name and use them.
+            if len(mapped_orig) < sub_nq:
+                missing = sub_nq - len(mapped_orig)
+                old_nq = new_circ.num_qubits
+                anc_name = f"{ancilla_prefix}{anc_counter}"
+                anc_counter += 1
+                anc_reg = QuantumRegister(missing, name=anc_name)
+                new_circ.add_register(anc_reg)
+                new_ancillas = new_circ.qubits[old_nq: old_nq + missing]
+
+                # Assume original qargs are [controls..., target]
+                if len(mapped_orig) >= 1:
+                    controls = mapped_orig[:-1]
+                    target = [mapped_orig[-1]]
+                else:
+                    # Defensive fallback; treat all mapped_orig as controls if target missing
+                    controls = mapped_orig
+                    target = []
+
+                mapped_for_sub = controls + list(new_ancillas) + target
+            else:
+                # Enough qubits were provided in the original MCX call.
+                # If the user provided extra qubits (e.g., included ancillas), we take the first sub_nq in order.
+                # (If you need different ordering, adapt this slice to match your calling convention.)
+                mapped_for_sub = mapped_orig[:sub_nq]
+
+            # Safety check
+            if len(mapped_for_sub) != sub_nq:
+                raise RuntimeError(
+                    f"mapped qubit count ({len(mapped_for_sub)}) != subcircuit qubits ({sub_nq})."
+                )
+
+            # Compose the synthesized subcircuit onto new_circ
+            new_circ.compose(sub, qubits=mapped_for_sub, inplace=True)
+
+        else:
+            # Non-MCX: map its bits and append as-is
+            new_qargs = [orig_qubit_map[q] for q in qargs]
+            new_cargs = [orig_clbit_map[c] for c in cargs]
+            new_circ.append(instr, new_qargs, new_cargs)
+
+    return new_circ
+
 def build_clifford_t_decomposition_circuit(qc):
     # Decompose using the specified basis gates
     # h, cx, s, sdg, t, tdg, z
+    # print("DCDEBUG transpile")
+    decomposed_qc = decompose_mcx_clean(qc)
+    # print("DCDEBUG transpile cx")
+    with open('circ_anc.txt', 'w') as f:
+        f.write(str(decomposed_qc.draw(output='text')))
     basis_gates = ['h', 'cx', 's', 'sdg', 't', 'tdg', 'z']
-    decomposed_qc = transpile(qc, basis_gates=basis_gates, optimization_level=0)
+    decomposed_qc = transpile(decomposed_qc, basis_gates=basis_gates, optimization_level=0)
+    # print("DCDEBUG transpile clifford+t")
     return decomposed_qc
 
 def circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit):
+    # Build mapping from ALL qubits in the circuit to names
     qmap = {}
-    all_qs = var_qubits + clause_qubits + ancilla_qubits + [global_qubit]
+    all_qs = qc.qubits  # all qubits including new ancillas
     for i, q in enumerate(all_qs):
-        qmap[q] = f"Q{i}"
+        qmap[q] = f"Q{i}"  # map each qubit object to a unique name
 
     json_gates = []
     for inst, qargs, cargs in qc.data:
         name = inst.name.upper()
-        targets = [qmap[q._index] for q in qargs[-1:]]
-        controls = [qmap[q._index] for q in qargs[:-1]]
+        targets = [qmap[q] for q in qargs[-1:]]  # last qubit = target
+        controls = [qmap[q] for q in qargs[:-1]]  # others = controls
         gate_json = {
             "name": name if name != "MCX" else "CCX" if len(controls) == 2 else "MCX",
             "targets": targets
@@ -150,6 +230,27 @@ def circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit)
             gate_json["controls"] = controls
         json_gates.append(gate_json)
     return json_gates
+
+
+# def circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit):
+#     qmap = {}
+#     all_qs = var_qubits + clause_qubits + ancilla_qubits + [global_qubit]
+#     for i, q in enumerate(all_qs):
+#         qmap[q] = f"Q{i}"
+
+#     json_gates = []
+#     for inst, qargs, cargs in qc.data:
+#         name = inst.name.upper()
+#         targets = [qmap[q._index] for q in qargs[-1:]]
+#         controls = [qmap[q._index] for q in qargs[:-1]]
+#         gate_json = {
+#             "name": name if name != "MCX" else "CCX" if len(controls) == 2 else "MCX",
+#             "targets": targets
+#         }
+#         if controls:
+#             gate_json["controls"] = controls
+#         json_gates.append(gate_json)
+#     return json_gates
 
 def write_circuit_ascii(qc, filename):
     # Save ASCII diagram to file
