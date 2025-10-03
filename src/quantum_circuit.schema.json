@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Quantum Circuit Gate List",
+  "description": "A quantum circuit represented as a list of gate objects for resource estimation.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Name of the gate (e.g., H, S, Sdag, T, Tdag, X, Y, Z, CX, CY, CZ, CCX, MAGIC_MOVE, MX, MZ, MY, barrior)"
+      },
+      "targets": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1,
+        "description": "List of target qubit names (first entry is used; others are ignored)."
+      },
+      "controls": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "List of control qubit names (first or first two used, depending on gate)."
+      },
+      "control_flips": {
+        "type": "array",
+        "items": { "type": "integer", "enum": [0, 1] },
+        "description": "List of control flip values (0: control on |0>, 1: control on |1>), length matches controls."
+      },
+      "condition": {
+        "type": "string",
+        "description": "Classical bit name. If present, gate executes only if this classical bit is 1."
+      },
+      "output": {
+        "type": "string",
+        "description": "Classical bit to which measurement results are added (for measurement gates)."
+      },
+      "note": {
+        "type": "string",
+        "description": "Special notes for CCX, e.g., 'start_t3', 'end_t3'."
+      }
+    },
+    "required": ["name", "targets"],
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "if": {
+          "properties": { "name": { "enum": ["CX", "CY", "CZ"] } }
+        },
+        "then": {
+          "required": ["controls"]
+        }
+      },
+      {
+        "if": {
+          "properties": { "name": { "enum": ["CCX"] } }
+        },
+        "then": {
+          "required": ["controls"],
+          "properties": {
+            "controls": {
+              "minItems": 2
+            },
+            "control_flips": {
+              "type": "array",
+              "items": { "type": "integer", "enum": [0, 1] }
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": { "name": { "enum": ["MX", "MZ", "MY"] } }
+        },
+        "then": {
+          "required": ["output"]
+        }
+      }
+    ]
+  }
+}
