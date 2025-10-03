@@ -51,47 +51,7 @@ pip install qiskit qiskit-aer numpy pytest pybind11
 pip install mqt.qcec  # For quantum circuit equivalence checking
 ```
 
-### Step 3: Build the C++ Library
-
-#### Option A: Using CMake (Recommended)
-
-```bash
-# Create build directory
-mkdir build
-cd build
-
-# Configure the build
-cmake ..
-
-# Install Python dependencies (optional, can also be done manually)
-cmake --build . --target install_python_deps
-
-# Build the project
-cmake --build . --config Release
-
-# This will:
-# 1. Compile the C++ SAT solver library
-# 2. Build Python bindings using pybind11
-# 3. Copy the compiled module to src/ directory
-```
-
-#### Option B: Manual Build (Advanced Users)
-
-```bash
-# Build only the C++ library
-cd lib
-mkdir build
-cd build
-cmake ..
-cmake --build . --config Release
-
-# Copy the generated Python module to src/
-cp sat_solver*.so ../../src/  # Linux/macOS
-# or
-cp sat_solver*.pyd ../../src/  # Windows
-```
-
-### Step 4: Verify Installation
+### Step 3: Verify Installation
 
 ```bash
 cd src
@@ -103,6 +63,7 @@ python cnf_to_mct_json.py --random --k=3 --nclauses=10 --nvars=10
 ```bash
 # 全テスト実行
 pytest test/ -v
+```
 
 ## Quick Start
 
