@@ -8,7 +8,9 @@
 3SAToracle/
 ├── src/                   	    # Python quantum circuit implementation
 │   ├── cnf_to_mct_json.py	    # CNFからJSONフォーマット
-│   ├── quantum_circuit.schema.json # JSONフォーマットのschema
+│   └── quantum_circuit.schema.json # JSONフォーマットのschema
+├── external/                       # 外部からのコード
+│   └── t-par                       # TカウントとTdepth削減(https://github.com/meamy/t-par)
 ├── lib/                            # TBD
 ├── test/                           # pytest
 ├── doc/                            # Documentation
@@ -65,7 +67,32 @@ python cnf_to_mct_json.py --random --k=3 --nclauses=10 --nvars=10
 pytest test/ -v
 ```
 
-## Quick Start
+## Usage
+```bash
+usage: cnf_to_mct_json.py [-h] [--random] [--nvars NVARS] [--nclauses NCLAUSES] [--k K] [--seed SEED] [--cnf CNF] [--json JSON]
+                          [--json_decomp JSON_DECOMP] [--ascii ASCII] [--ascii_decomp ASCII_DECOMP] [--quantikz QUANTIKZ]
+                          [--quantikz_decomp QUANTIKZ_DECOMP]
+
+Generate random CNF, build quantum circuit, and output JSON and diagrams.
+
+options:
+  -h, --help            show this help message and exit
+  --random              Generate a random CNF file.
+  --nvars NVARS         Number of variables for random CNF.
+  --nclauses NCLAUSES   Number of clauses for random CNF.
+  --k K                 Clause width for random CNF.
+  --seed SEED           Random seed for CNF generation.
+  --cnf CNF             Input/output CNF file.
+  --json JSON           Output JSON file.
+  --json_decomp JSON_DECOMP
+                        Output decomposed JSON file.
+  --ascii ASCII         ASCII diagram output file for original circuit.
+  --ascii_decomp ASCII_DECOMP
+                        ASCII diagram output file for decomposed circuit.
+  --quantikz QUANTIKZ   Quantikz diagram output file for original circuit.
+  --quantikz_decomp QUANTIKZ_DECOMP
+                        Quantikz diagram output file for decomposed circuit.
+```
 
 
 ## Contributing
