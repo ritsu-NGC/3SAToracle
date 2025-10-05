@@ -82,7 +82,7 @@ options:
   --nclauses NCLAUSES   Number of clauses for random CNF.
   --k K                 Clause width for random CNF.
   --seed SEED           Random seed for CNF generation.
-  --cnf CNF             Input/output CNF file. Expressed in [DIMACS][https://jix.github.io/varisat/manual/0.2.0/formats/dimacs.html] format.
+  --cnf CNF             Input/output CNF file. Expressed in DIMACS format (https://jix.github.io/varisat/manual/0.2.0/formats/dimacs.html).
   --json JSON           Output JSON file.
   --json_decomp JSON_DECOMP
                         Output decomposed JSON file.
