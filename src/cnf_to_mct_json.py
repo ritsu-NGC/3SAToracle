@@ -9,8 +9,15 @@ import random
 import argparse
 import os
 import sys
+import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'external', 't-par')))
 from t_par import run_tpar
+
+# SAT solver dependencies
+try:
+    from pysat.solvers import Solver
+except ImportError:
+    Solver = None
 
 def generate_random_cnf(nvars, nclauses, k=3, seed=None):
     if seed is not None:
@@ -43,6 +50,47 @@ def read_dimacs_cnf(path):
         if clause:
             clauses.append(clause)
     return nvars, clauses
+
+def run_sat_solver_on_dimacs(path):
+    if Solver is None:
+        print("PySAT is not installed. Please run 'pip install python-sat'")
+        return
+    print(f"Running SAT solver on {path} ...")
+    # Parse DIMACS and add clauses
+    clauses = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line == "" or line.startswith("c") or line.startswith("p"):
+                continue
+            clause = [int(lit) for lit in line.split() if lit != '0']
+            if clause:
+                clauses.append(clause)
+    start = time.time()
+    with Solver(name='g3', bootstrap_with=clauses) as solver:
+        sat = solver.solve()
+        elapsed = time.time() - start
+        if sat:
+            status_str = "SATISFIABLE"
+            model = solver.get_model()
+            result_comment = (
+                f"c SAT solver result: {status_str}\n"
+                f"c SAT time: {elapsed:.6f} seconds\n"
+                f"c SAT solution (first): {' '.join(str(lit) for lit in model)}\n"
+            )
+        else:
+            status_str = "UNSATISFIABLE"
+            result_comment = (
+                f"c SAT solver result: {status_str}\n"
+                f"c SAT time: {elapsed:.6f} seconds\n"
+            )
+        print(result_comment)
+
+    # Prepend result_comment to DIMACS file
+    with open(path, "r") as f:
+        orig = f.read()
+    with open(path, "w") as f:
+        f.write(result_comment + orig)
 
 def build_circuit_from_cnf_with_global_and(nvars, clauses):
     n_clauses = len(clauses)
@@ -128,33 +176,16 @@ def build_circuit_from_cnf_with_global_and(nvars, clauses):
 def decompose_mcx_clean(circ: QuantumCircuit,
                         synth_fn=synth_mcx_1_clean_kg24,
                         ancilla_prefix: str = "anc") -> QuantumCircuit:
-    """
-    Replace every MCXGate in `circ` with the clean-ancilla synthesis returned by synth_fn(k).
-    synth_fn(k) should return a QuantumCircuit whose qubit order is (controls..., ancillas..., target).
-    If the original MCX call did not provide enough qubits for the subcircuit, this function
-    automatically allocates ancilla registers with unique names (anc0, anc1, ...).
-    """
-    # Start a new circuit with the same total primary qubits/clbits (these are 'placeholder' qubits).
     new_circ = QuantumCircuit(circ.num_qubits, circ.num_clbits)
-
-    # Maps from original circuit bits to new circuit bits
     orig_qubit_map = {q: new_circ.qubits[i] for i, q in enumerate(circ.qubits)}
     orig_clbit_map = {c: new_circ.clbits[i] for i, c in enumerate(circ.clbits)}
-
     anc_counter = 0
-
     for instr, qargs, cargs in circ.data:
-        # If it's an MCX gate, replace it
         if isinstance(instr, MCXGate):
             k = instr.num_ctrl_qubits
             sub = synth_fn(k)
             sub_nq = sub.num_qubits
-
-            # Map the qargs from the original circuit to the new circuit's qubits
             mapped_orig = [orig_qubit_map[q] for q in qargs]
-
-            # If the synth subcircuit needs more qubits than were provided in the original call,
-            # allocate ancillas with a unique register name and use them.
             if len(mapped_orig) < sub_nq:
                 missing = sub_nq - len(mapped_orig)
                 old_nq = new_circ.num_qubits
@@ -163,65 +194,68 @@ def decompose_mcx_clean(circ: QuantumCircuit,
                 anc_reg = QuantumRegister(missing, name=anc_name)
                 new_circ.add_register(anc_reg)
                 new_ancillas = new_circ.qubits[old_nq: old_nq + missing]
-
-                # Assume original qargs are [controls..., target]
                 if len(mapped_orig) >= 1:
                     controls = mapped_orig[:-1]
                     target = [mapped_orig[-1]]
                 else:
-                    # Defensive fallback; treat all mapped_orig as controls if target missing
                     controls = mapped_orig
                     target = []
-
                 mapped_for_sub = controls + list(new_ancillas) + target
             else:
-                # Enough qubits were provided in the original MCX call.
-                # If the user provided extra qubits (e.g., included ancillas), we take the first sub_nq in order.
-                # (If you need different ordering, adapt this slice to match your calling convention.)
                 mapped_for_sub = mapped_orig[:sub_nq]
-
-            # Safety check
             if len(mapped_for_sub) != sub_nq:
                 raise RuntimeError(
                     f"mapped qubit count ({len(mapped_for_sub)}) != subcircuit qubits ({sub_nq})."
                 )
-
-            # Compose the synthesized subcircuit onto new_circ
             new_circ.compose(sub, qubits=mapped_for_sub, inplace=True)
-
         else:
-            # Non-MCX: map its bits and append as-is
             new_qargs = [orig_qubit_map[q] for q in qargs]
             new_cargs = [orig_clbit_map[c] for c in cargs]
             new_circ.append(instr, new_qargs, new_cargs)
-
     return new_circ
 
 def build_clifford_t_decomposition_circuit(qc):
-    # Decompose using the specified basis gates
-    # h, cx, s, sdg, t, tdg, z
-    # print("DCDEBUG transpile")
     decomposed_qc = decompose_mcx_clean(qc)
-    # print("DCDEBUG transpile cx")
     with open('circ_anc.txt', 'w') as f:
         f.write(str(decomposed_qc.draw(output='text')))
     basis_gates = ['h', 'cx', 's', 'sdg', 't', 'tdg', 'z']
     decomposed_qc = transpile(decomposed_qc, basis_gates=basis_gates, optimization_level=0)
-    # print("DCDEBUG transpile clifford+t")
-    return decomposed_qc
+
+    # Map old qubits to new
+    final_qc = QuantumCircuit(decomposed_qc.num_qubits, decomposed_qc.num_clbits)
+    qubit_map = {q: final_qc.qubits[i] for i, q in enumerate(decomposed_qc.qubits)}
+    clbit_map = {c: final_qc.clbits[i] for i, c in enumerate(decomposed_qc.clbits)}
+
+    for inst, qargs, cargs in decomposed_qc.data:
+        # Map qargs and cargs to this circuit's bits
+        mapped_qargs = [qubit_map[q] for q in qargs]
+        mapped_cargs = [clbit_map[c] for c in cargs]
+        if inst.name == "s":
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+        elif inst.name == "sdg":
+            final_qc.tdg(mapped_qargs[0])
+            final_qc.tdg(mapped_qargs[0])
+        elif inst.name == "z":
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+        else:
+            final_qc.append(inst, mapped_qargs, mapped_cargs)
+
+    return final_qc
 
 def circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit):
-    # Build mapping from ALL qubits in the circuit to names
     qmap = {}
-    all_qs = qc.qubits  # all qubits including new ancillas
+    all_qs = qc.qubits
     for i, q in enumerate(all_qs):
-        qmap[q] = f"Q{i}"  # map each qubit object to a unique name
-
+        qmap[q] = f"Q{i}"
     json_gates = []
     for inst, qargs, cargs in qc.data:
         name = inst.name.upper()
-        targets = [qmap[q] for q in qargs[-1:]]  # last qubit = target
-        controls = [qmap[q] for q in qargs[:-1]]  # others = controls
+        targets = [qmap[q] for q in qargs[-1:]]
+        controls = [qmap[q] for q in qargs[:-1]]
         gate_json = {
             "name": name if name != "MCX" else "CCX" if len(controls) == 2 else "MCX",
             "targets": targets
@@ -231,35 +265,12 @@ def circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit)
         json_gates.append(gate_json)
     return json_gates
 
-
-# def circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit):
-#     qmap = {}
-#     all_qs = var_qubits + clause_qubits + ancilla_qubits + [global_qubit]
-#     for i, q in enumerate(all_qs):
-#         qmap[q] = f"Q{i}"
-
-#     json_gates = []
-#     for inst, qargs, cargs in qc.data:
-#         name = inst.name.upper()
-#         targets = [qmap[q._index] for q in qargs[-1:]]
-#         controls = [qmap[q._index] for q in qargs[:-1]]
-#         gate_json = {
-#             "name": name if name != "MCX" else "CCX" if len(controls) == 2 else "MCX",
-#             "targets": targets
-#         }
-#         if controls:
-#             gate_json["controls"] = controls
-#         json_gates.append(gate_json)
-#     return json_gates
-
 def write_circuit_ascii(qc, filename):
-    # Save ASCII diagram to file
     ascii_diagram = qc.draw(output='text')
     with open(filename, 'w') as f:
         f.write(str(ascii_diagram))
 
 def write_circuit_quantikz(qc, filename):
-    # Save quantikz latex diagram to file
     try:
         quantikz_latex = qc.draw(output='latex_source')
     except Exception as e:
@@ -270,9 +281,29 @@ def write_circuit_quantikz(qc, filename):
 def opt_circ(qc):
     with open("circ.qasm",'w') as f:
         f.write(qasm2.dumps(qc))
-    return run_tpar(qc)
+    opt_qc = run_tpar(qc)
+    qubit_map = {q: opt_qc.qubits[i] for i, q in enumerate(opt_qc.qubits)}
+    clbit_map = {c: opt_qc.clbits[i] for i, c in enumerate(opt_qc.clbits)}
+    final_qc = QuantumCircuit(opt_qc.num_qubits, opt_qc.num_clbits)
+    for inst, qargs, cargs in opt_qc.data:
+        # Map qargs and cargs to this circuit's bits
+        mapped_qargs = [qubit_map[q] for q in qargs]
+        mapped_cargs = [clbit_map[c] for c in cargs]
+        if inst.name == "s":
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+        elif inst.name == "sdg":
+            final_qc.tdg(mapped_qargs[0])
+            final_qc.tdg(mapped_qargs[0])
+        elif inst.name == "z":
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+            final_qc.t(mapped_qargs[0])
+        else:
+            final_qc.append(inst, mapped_qargs, mapped_cargs)
+    return final_qc
 
-    
 def main():
     parser = argparse.ArgumentParser(description="Generate random CNF, build quantum circuit, and output JSON and diagrams.")
     parser.add_argument('--random', action='store_true', help="Generate a random CNF file.")
@@ -287,42 +318,86 @@ def main():
     parser.add_argument('--ascii_decomp', type=str, default="circuit_ascii_decomp.txt", help="ASCII diagram output file for decomposed circuit.")
     parser.add_argument('--quantikz', type=str, default="circuit_quantikz.tex", help="Quantikz diagram output file for original circuit.")
     parser.add_argument('--quantikz_decomp', type=str, default="circuit_quantikz_decomp.tex", help="Quantikz diagram output file for decomposed circuit.")
+    parser.add_argument('--sat', action='store_true', help="Run SAT solver on the CNF file after generation.")
+    # Added for multiple configs
+    parser.add_argument('--nconfigs', type=int, default=1, help="Number of random configurations to generate and run.")
+    parser.add_argument('--nvars_min', type=int, default=None, help="Minimum number of variables (if varying).")
+    parser.add_argument('--nvars_max', type=int, default=None, help="Maximum number of variables (if varying).")
+    parser.add_argument('--nclauses_min', type=int, default=None, help="Minimum number of clauses (if varying).")
+    parser.add_argument('--nclauses_max', type=int, default=None, help="Maximum number of clauses (if varying).")
+
     args = parser.parse_args()
 
-    if args.random or not (args.cnf and os.path.exists(args.cnf)):
-        clauses = generate_random_cnf(args.nvars, args.nclauses, k=args.k, seed=args.seed)
-        write_dimacs_cnf(args.nvars, clauses, args.cnf)
-        print(f"Random CNF written to {args.cnf}:")
-        with open(args.cnf) as f:
-            print(f.read())
-        nvars = args.nvars
-    else:
-        nvars, clauses = read_dimacs_cnf(args.cnf)
+    # If only one config, preserve previous behavior
+    nconfigs = args.nconfigs if args.nconfigs > 0 else 1
 
-    qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit = build_circuit_from_cnf_with_global_and(nvars, clauses)
+    for i in range(nconfigs):
+        # If random is set or --nconfigs > 1, always randomize
+        if args.random or (nconfigs > 1):
+            # Optionally randomize nvars/nclauses
+            nvars = args.nvars
+            nclauses = args.nclauses
+            if args.nvars_min is not None and args.nvars_max is not None:
+                nvars = random.randint(args.nvars_min, args.nvars_max)
+            if args.nclauses_min is not None and args.nclauses_max is not None:
+                nclauses = random.randint(args.nclauses_min, args.nclauses_max)
+            # Different seed for each config unless overridden
+            config_seed = args.seed + i if args.seed is not None else random.randint(0, 999999)
 
-    json_gates = circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit)
-    with open(args.json, 'w') as f:
-        json.dump(json_gates, f, indent=2, ensure_ascii=False)
-    print(f"Quantum circuit JSON written to {args.json}")
-    print(f"Global output qubit index: {global_qubit}")
+            # Unique file names for each configuration
+            prefix = f"_config{i+1}"
+            cnf_file = args.cnf.replace(".cnf", f"{prefix}.cnf")
+            json_file = args.json.replace(".json", f"{prefix}.json")
+            json_decomp_file = args.json_decomp.replace(".json", f"{prefix}.json")
+            ascii_file = args.ascii.replace(".txt", f"{prefix}.txt")
+            ascii_decomp_file = args.ascii_decomp.replace(".txt", f"{prefix}.txt")
+            quantikz_file = args.quantikz.replace(".tex", f"{prefix}.tex")
+            quantikz_decomp_file = args.quantikz_decomp.replace(".tex", f"{prefix}.tex")
 
-    write_circuit_ascii(qc, args.ascii)
-    print(f"ASCII diagram written to {args.ascii}")
-    write_circuit_quantikz(qc, args.quantikz)
-    print(f"Quantikz diagram written to {args.quantikz}")
+            # Generate and write CNF
+            clauses = generate_random_cnf(nvars, nclauses, k=args.k, seed=config_seed)
+            write_dimacs_cnf(nvars, clauses, cnf_file)
+            print(f"Random CNF written to {cnf_file} (nvars={nvars}, nclauses={nclauses}, seed={config_seed})")
+            with open(cnf_file) as f:
+                print(f.read())
+        else:
+            cnf_file = args.cnf
+            json_file = args.json
+            json_decomp_file = args.json_decomp
+            ascii_file = args.ascii
+            ascii_decomp_file = args.ascii_decomp
+            quantikz_file = args.quantikz
+            quantikz_decomp_file = args.quantikz_decomp
+            nvars, clauses = read_dimacs_cnf(cnf_file)
 
-    decomposed_qc = build_clifford_t_decomposition_circuit(qc)
-    decomposed_qc = opt_circ(decomposed_qc)    
-    json_gates_decomp = circuit_to_json(decomposed_qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit)
-    with open(args.json_decomp, 'w') as f:
-        json.dump(json_gates_decomp, f, indent=2, ensure_ascii=False)
-    print(f"Decomposed Clifford+T circuit JSON written to {args.json_decomp}")
+        # Run SAT solver if requested or if random generation occurred
+        if args.sat or args.random or (nconfigs > 1):
+            run_sat_solver_on_dimacs(cnf_file)
 
-    write_circuit_ascii(decomposed_qc, args.ascii_decomp)
-    print(f"ASCII diagram (decomposed) written to {args.ascii_decomp}")
-    write_circuit_quantikz(decomposed_qc, args.quantikz_decomp)
-    print(f"Quantikz diagram (decomposed) written to {args.quantikz_decomp}")
+        # Build and process quantum circuit
+        qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit = build_circuit_from_cnf_with_global_and(nvars, clauses)
+        json_gates = circuit_to_json(qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit)
+        with open(json_file, 'w') as f:
+            json.dump(json_gates, f, indent=2, ensure_ascii=False)
+        print(f"Quantum circuit JSON written to {json_file}")
+        print(f"Global output qubit index: {global_qubit}")
+
+        write_circuit_ascii(qc, ascii_file)
+        print(f"ASCII diagram written to {ascii_file}")
+        write_circuit_quantikz(qc, quantikz_file)
+        print(f"Quantikz diagram written to {quantikz_file}")
+
+        decomposed_qc = build_clifford_t_decomposition_circuit(qc)
+        new_decomposed_qc = opt_circ(decomposed_qc)    
+        json_gates_decomp = circuit_to_json(new_decomposed_qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit)
+        with open(json_decomp_file, 'w') as f:
+            json.dump(json_gates_decomp, f, indent=2, ensure_ascii=False)
+        print(f"Decomposed Clifford+T circuit JSON written to {json_decomp_file}")
+
+        write_circuit_ascii(new_decomposed_qc, ascii_decomp_file)
+        print(f"ASCII diagram (decomposed) written to {ascii_decomp_file}")
+        write_circuit_quantikz(new_decomposed_qc, quantikz_decomp_file)
+        print(f"Quantikz diagram (decomposed) written to {quantikz_decomp_file}")
 
 if __name__ == "__main__":
     main()
