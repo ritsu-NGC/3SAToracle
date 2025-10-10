@@ -54,7 +54,7 @@ def read_dimacs_cnf(path):
 def run_sat_solver_on_dimacs(path):
     if Solver is None:
         print("PySAT is not installed. Please run 'pip install python-sat'")
-        return
+        return ""
     print(f"Running SAT solver on {path} ...")
     # Parse DIMACS and add clauses
     clauses = []
@@ -86,11 +86,68 @@ def run_sat_solver_on_dimacs(path):
             )
         print(result_comment)
 
-    # Prepend result_comment to DIMACS file
+    return result_comment
+
+def run_naive_sat_solver_on_dimacs(path):
+    import random
+    # Parse DIMACS and add clauses
+    clauses = []
+    nvars = 0
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line == "" or line.startswith("c"):
+                continue
+            if line.startswith("p cnf"):
+                nvars = int(line.split()[2])
+                continue
+            clause = [int(lit) for lit in line.split() if lit != '0']
+            if clause:
+                clauses.append(clause)
+    if nvars == 0 or not clauses:
+        print("Naive SAT: No variables or clauses found.")
+        return ""
+
+    print(f"Running naive SAT timing estimate on {path} (nvars={nvars}) ...")
+
+    # Try a single random assignment (could also use all 0s for deterministic)
+    assignment = [random.choice([False, True]) for _ in range(nvars)]
+
+    # Measure the time to check one assignment
+    start = time.time()
+    satisfied = True
+    for clause in clauses:
+        clause_satisfied = False
+        for lit in clause:
+            var_idx = abs(lit) - 1
+            var_val = assignment[var_idx]
+            if (lit > 0 and var_val) or (lit < 0 and not var_val):
+                clause_satisfied = True
+                break
+        if not clause_satisfied:
+            satisfied = False
+            break
+    elapsed_one = time.time() - start
+
+    total_assignments = 2 ** nvars
+    worst_case_time = elapsed_one * total_assignments
+    average_case_time = elapsed_one * (total_assignments / 2)
+
+    result_comment = (
+        f"c NAIVE SAT timing estimate (single assignment): {elapsed_one:.8f} seconds\n"
+        f"c NAIVE SAT estimated worst-case time (all {total_assignments} assignments): {worst_case_time:.6f} seconds\n"
+        f"c NAIVE SAT estimated average-case time (half assignments): {average_case_time:.6f} seconds\n"
+    )
+    print(result_comment)
+    return result_comment
+
+def prepend_comments_to_dimacs(path, comments):
+    # Read original file
     with open(path, "r") as f:
         orig = f.read()
+    # Write comments + orig
     with open(path, "w") as f:
-        f.write(result_comment + orig)
+        f.write(''.join(comments) + orig)
 
 def build_circuit_from_cnf_with_global_and(nvars, clauses):
     n_clauses = len(clauses)
@@ -370,9 +427,11 @@ def main():
             quantikz_decomp_file = args.quantikz_decomp
             nvars, clauses = read_dimacs_cnf(cnf_file)
 
-        # Run SAT solver if requested or if random generation occurred
+        # Run SAT solvers if requested or if random generation occurred
         if args.sat or args.random or (nconfigs > 1):
-            run_sat_solver_on_dimacs(cnf_file)
+            naive_result = run_naive_sat_solver_on_dimacs(cnf_file)
+            pysat_result = run_sat_solver_on_dimacs(cnf_file)
+            prepend_comments_to_dimacs(cnf_file, [naive_result, pysat_result])
 
         # Build and process quantum circuit
         qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit = build_circuit_from_cnf_with_global_and(nvars, clauses)
@@ -388,7 +447,7 @@ def main():
         print(f"Quantikz diagram written to {quantikz_file}")
 
         decomposed_qc = build_clifford_t_decomposition_circuit(qc)
-        new_decomposed_qc = opt_circ(decomposed_qc)    
+        new_decomposed_qc = opt_circ(decomposed_qc)
         json_gates_decomp = circuit_to_json(new_decomposed_qc, var_qubits, clause_qubits, ancilla_qubits, global_qubit)
         with open(json_decomp_file, 'w') as f:
             json.dump(json_gates_decomp, f, indent=2, ensure_ascii=False)
